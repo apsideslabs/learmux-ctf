@@ -3,6 +3,7 @@
 # this file, so shellcheck cannot see the use. Challenge files are sourced by
 # path at runtime. Both are expected.
 # shellcheck disable=SC2034,SC1091
+#
 # Shared helpers for the Learmux CTF.
 #
 # Sourced by the ctf CLI and by the installer. Not meant to be run directly.
@@ -21,6 +22,7 @@ LEARMUX_LIB="$LEARMUX_HOME/lib"
 LEARMUX_CHALLENGES="$LEARMUX_HOME/challenges"
 LEARMUX_SEED="$LEARMUX_HOME/seed"
 LEARMUX_SOLVED="$LEARMUX_HOME/solved"
+LEARMUX_HINTS="$LEARMUX_HOME/hints"
 LEARMUX_MANIFEST="$LEARMUX_HOME/manifest"
 LEARMUX_VERSION_FILE="$LEARMUX_HOME/version"
 
@@ -34,8 +36,9 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   C_YELLOW=$'\033[33m'
   C_RED=$'\033[31m'
   C_CYAN=$'\033[36m'
+  C_INVERT=$'\033[7m'
 else
-  C_RESET=''; C_DIM=''; C_BOLD=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_CYAN=''
+  C_RESET=''; C_DIM=''; C_BOLD=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_CYAN=''; C_INVERT=''
 fi
 
 say()  { printf '%s\n' "$*"; }
@@ -46,6 +49,54 @@ warn() { printf '%s%s%s\n' "$C_YELLOW" "$*" "$C_RESET" >&2; }
 die()  { printf '%s%s%s\n' "$C_RED" "$*" "$C_RESET" >&2; exit 1; }
 
 rule() { printf '%s%s%s\n' "$C_DIM" "────────────────────────────────────────────────────────────" "$C_RESET"; }
+
+# ── animation ───────────────────────────────────────────────────────────────
+# Decided once, at source time, so nothing has to test it repeatedly. Animation
+# needs an interactive terminal and a sleep that accepts fractions (the GNU
+# coreutils sleep in Termux does). Piped output and NO_COLOR always get the
+# plain version, which is also what the test suite exercises.
+LEARMUX_ANIM=0
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${LEARMUX_NO_ANIM:-0}" != "1" ]; then
+  if sleep 0.01 2>/dev/null; then LEARMUX_ANIM=1; fi
+fi
+
+animating() { [ "$LEARMUX_ANIM" = "1" ]; }
+
+# Print text one character at a time. Falls back to plain output.
+type_out() {
+  local text="$1" i
+  if ! animating; then printf '%s\n' "$text"; return 0; fi
+  for (( i = 0; i < ${#text}; i++ )); do
+    printf '%s' "${text:i:1}"
+    sleep 0.012
+  done
+  printf '\n'
+}
+
+# A one-line progress bar, redrawn in place.
+progress_bar() { # <done> <total> [width]
+  local done="$1" total="$2" width="${3:-26}" filled=0 i bar=''
+  [ "$total" -gt 0 ] || total=1
+  [ "$done" -le "$total" ] || done="$total"
+  filled=$(( done * width / total ))
+  for (( i = 0; i < width; i++ )); do
+    if [ "$i" -lt "$filled" ]; then bar="${bar}█"; else bar="${bar}░"; fi
+  done
+  if [ -t 1 ]; then
+    printf '\r  %s%s%s  %s/%s' "$C_GREEN" "$bar" "$C_RESET" "$done" "$total"
+  fi
+}
+
+# Reveal a solved flag as if it were being decrypted.
+reveal() { # <text>
+  local text="$1" i
+  if ! animating; then printf '%s\n' "$text"; return 0; fi
+  for (( i = 0; i < ${#text}; i++ )); do
+    printf '%s' "${text:i:1}"
+    sleep 0.02
+  done
+  printf '\n'
+}
 
 # ── hashing ─────────────────────────────────────────────────────────────────
 # Termux ships sha256sum with coreutils. The others are fallbacks.
@@ -109,6 +160,12 @@ derived_name() {
   printf '%s\n' "$(printf '%s' "$digest" | cut -c1-"${3:-8}")"
 }
 
+# A short public name for this device, safe to show and to share. It reveals
+# nothing about the seed itself.
+device_id() {
+  printf '%s\n' "$(printf 'device:%s' "$(ensure_seed)" | sha256_hex | cut -c1-8)"
+}
+
 # ── the manifest ────────────────────────────────────────────────────────────
 # Every path this tool creates is recorded here, in creation order. That is what
 # makes uninstall exact rather than a guess.
@@ -131,13 +188,52 @@ mark_solved() {
 }
 
 solved_count() {
-  [ -f "$LEARMUX_SOLVED" ] && grep -c . "$LEARMUX_SOLVED" || printf '0\n'
+  if [ -f "$LEARMUX_SOLVED" ]; then grep -c . "$LEARMUX_SOLVED"; else printf '0\n'; fi
+}
+
+# ── hints ───────────────────────────────────────────────────────────────────
+# A hint can run to several lines, so hints are separated by a line holding
+# only three dashes. That keeps the challenge files readable while letting the
+# CLI count hints rather than lines.
+hints_count() { # reads stdin
+  local input
+  input="$(cat)"
+  if [ -z "$input" ]; then printf '0\n'; return 0; fi
+  printf '%s\n' "$input" | awk 'BEGIN { n = 1 } /^---$/ { n++ } END { print n }'
+}
+
+hints_nth() { # <n>, reads stdin
+  awk -v want="$1" 'BEGIN { n = 1 } /^---$/ { n++; next } n == want { print }'
+}
+
+# How many hints you have asked for, per challenge. Stored so `ctf hint` gives
+# you the next one rather than starting over.
+hints_revealed() { # <slug>
+  local f="$LEARMUX_HINTS/$1"
+  if [ -f "$f" ]; then cat "$f"; else printf '0\n'; fi
+}
+
+hints_used_total() {
+  [ -d "$LEARMUX_HINTS" ] || { printf '0\n'; return; }
+  cat "$LEARMUX_HINTS"/* 2>/dev/null | awk '{s+=$1} END {printf "%d\n", s+0}'
+}
+
+# Everything this tool writes must be recorded in the manifest, or uninstall
+# will leave it behind. That applies to the hint counters too.
+bump_hints() { # <slug> <new-count>
+  mkdir -p "$LEARMUX_HINTS"
+  manifest_record "$LEARMUX_HINTS"
+  printf '%s\n' "$2" > "$LEARMUX_HINTS/$1"
+  manifest_record "$LEARMUX_HINTS/$1"
 }
 
 # ── challenges ──────────────────────────────────────────────────────────────
 # Each challenge is a directory holding a challenge.sh that sets a few
-# CHALLENGE_* variables and defines challenge_briefing, challenge_files and
-# challenge_setup.
+# CHALLENGE_* variables and defines challenge_briefing, challenge_files,
+# challenge_setup and challenge_hints.
+#
+# The same directory may hold a solution.sh, which the installer deliberately
+# does not copy. Solutions are for the test suite.
 
 # Read one metadata variable out of a challenge, without polluting this shell.
 challenge_meta() { # <dir> <VAR_NAME>
@@ -172,4 +268,36 @@ challenge_dirs() {
 
 challenge_count() {
   challenge_dirs | grep -c . || printf '0\n'
+}
+
+# Total points on offer, and points captured.
+points_total() {
+  local dir sum=0 p
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    p="$(challenge_meta "$dir" CHALLENGE_POINTS)"
+    sum=$(( sum + ${p:-0} ))
+  done <<< "$(challenge_dirs)"
+  printf '%s\n' "$sum"
+}
+
+points_earned() {
+  local dir slug sum=0 p
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    slug="$(challenge_meta "$dir" CHALLENGE_SLUG)"
+    if is_solved "$slug"; then
+      p="$(challenge_meta "$dir" CHALLENGE_POINTS)"
+      sum=$(( sum + ${p:-0} ))
+    fi
+  done <<< "$(challenge_dirs)"
+  printf '%s\n' "$sum"
+}
+
+# ── json ────────────────────────────────────────────────────────────────────
+# Enough JSON writing for the export command, with no dependency.
+json_escape() {
+  printf '%s' "$1" |
+    sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r/\\r/g' |
+    awk '{ printf "%s%s", (NR > 1 ? "\\n" : ""), $0 }'
 }
