@@ -69,6 +69,7 @@ check_true "the ctf command was installed" "$([ -x "$CTF" ] && echo 0 || echo 1 
 check_true "the challenge was copied" "$([ -f "$LEAR/challenges/01-hidden-file/challenge.sh" ] && echo 0 || echo 1 )"
 check_true "the library was copied" "$([ -f "$LEAR/lib/common.sh" ] && echo 0 || echo 1 )"
 check_true "the installer did not claim PREFIX/bin" "$(grep -qx "$PREFIX/bin" "$LEAR/manifest" && echo 1 || echo 0 )"
+check "the manifest has no /. entries" "$(grep -c '/\.$' "$LEAR/manifest")" "0"
 seed_before="$(tr -d '\n' < "$LEAR/seed")"
 
 printf '\n── ctf list ──\n'
@@ -148,6 +149,8 @@ check_true "the ctf command is gone" "$([ ! -e "$CTF" ] && echo 0 || echo 1 )"
 check_true "the flag file is gone" "$([ ! -e "$HOME/$flagfile" ] && echo 0 || echo 1 )"
 check_true "the decoy is gone" "$([ ! -e "$HOME/$decoy" ] && echo 0 || echo 1 )"
 check_true "PREFIX/bin was left alone" "$([ -d "$PREFIX/bin" ] && echo 0 || echo 1 )"
+check_true "uninstall reports a clean removal" "$(printf '%s' "$out" | grep -q 'Removed' && printf '%s' "$out" | grep -q 'not empty' && echo 1 || echo 0 )"
+check_true "and lists no leftovers" "$(printf '%s' "$out" | grep -q 'left alone' && echo 1 || echo 0 )"
 check_true "the home directory itself is untouched" "$([ -d "$HOME" ] && echo 0 || echo 1 )"
 
 printf '\n── uninstalling again is harmless ──\n'
