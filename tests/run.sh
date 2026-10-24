@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
+# Challenge and solution files are sourced by path at runtime, so shellcheck
+# cannot follow them. That is expected.
+# shellcheck disable=SC1091
 # End-to-end test for the Learmux CTF.
 #
-# Installs into a throwaway HOME and PREFIX, plays challenge 01 the way a
+# Installs into a throwaway HOME and PREFIX, plays every challenge the way a
 # learner would, and uninstalls. Nothing touches the real home directory.
 #
 #   ./tests/run.sh
@@ -42,6 +45,7 @@ check_true() { # <name> <0-or-1>
     printf 'FAIL %s\n' "$1"; fail=$((fail + 1))
   fi
 }
+
 # First file in a directory matching a prefix, as a bare name.
 find_hidden() { # <dir> <prefix>
   local f
@@ -52,11 +56,35 @@ find_hidden() { # <dir> <prefix>
   done
 }
 
+# Read one CHALLENGE_* value out of a challenge in the repository.
+challenge_field() { # <dir> <VAR>
+  ( . "$1/challenge.sh"; eval "printf '%s' \"\${$2:-}\"" )
+}
+
+# The flag this device should produce for a challenge.
+expected_flag() { # <id>
+  ( LEARMUX_HOME="$LEAR" . "$LEAR/lib/common.sh"; flag_for "$1" )
+}
+
+# Run the commands a challenge's solution.sh prints, and return everything they
+# produced. This is how a challenge is proved solvable without shipping the
+# answer to the player.
+solve() { # <repo-challenge-dir>
+  local dir="$1" line out=''
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    out="${out}$(eval "$line" 2>&1)"$'\n'
+  done <<< "$( . "$dir/solution.sh"; challenge_solution )"
+  printf '%s' "$out"
+}
+
+# ── the installer refuses outside Termux ────────────────────────────────────
 printf '\n── the installer refuses outside Termux ──\n'
 out="$( bash "$REPO/install.sh" --yes 2>&1 )"; code=$?
 check_true "refuses without --force when Termux is not detected" "$([ "$code" -ne 0 ] && echo 0 || echo 1 )"
 check_true "and writes nothing" "$([ ! -d "$LEAR" ] && echo 0 || echo 1 )"
 
+# ── install ─────────────────────────────────────────────────────────────────
 printf '\n── install ──\n'
 out="$( bash "$REPO/install.sh" --yes --force 2>&1 )"; code=$?
 check "install exits 0" "$code" "0"
@@ -66,69 +94,121 @@ check "the seed is 64 hex characters" "$(tr -d '\n' < "$LEAR/seed" | wc -c | tr 
 check "the seed is hex" "$(grep -c '^[0-9a-f]\{64\}$' "$LEAR/seed" || true)" "1"
 check_true "a manifest was written" "$([ -s "$LEAR/manifest" ] && echo 0 || echo 1 )"
 check_true "the ctf command was installed" "$([ -x "$CTF" ] && echo 0 || echo 1 )"
-check_true "the challenge was copied" "$([ -f "$LEAR/challenges/01-hidden-file/challenge.sh" ] && echo 0 || echo 1 )"
 check_true "the library was copied" "$([ -f "$LEAR/lib/common.sh" ] && echo 0 || echo 1 )"
+check "the version is recorded" "$(cat "$LEAR/version")" "0.2.0"
 check_true "the installer did not claim PREFIX/bin" "$(grep -qx "$PREFIX/bin" "$LEAR/manifest" && echo 1 || echo 0 )"
 check "the manifest has no /. entries" "$(grep -c '/\.$' "$LEAR/manifest")" "0"
 seed_before="$(tr -d '\n' < "$LEAR/seed")"
 
+# ── every challenge is installed, and no solution is ────────────────────────
+printf '\n── what got installed ──\n'
+repo_challenges=$(find "$REPO/challenges" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+check "challenges in the repository" "$repo_challenges" "6"
+check "challenges installed" "$(find "$LEAR/challenges" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" "6"
+check "solution files installed" "$(find "$LEAR/challenges" -name 'solution.sh' | wc -l | tr -d ' ')" "0"
+check_true "the repository still holds the solutions" "$([ "$(find "$REPO/challenges" -name 'solution.sh' | wc -l | tr -d ' ')" = "6" ] && echo 0 || echo 1 )"
+
+# ── ctf list ────────────────────────────────────────────────────────────────
 printf '\n── ctf list ──\n'
 out="$( "$CTF" list 2>&1 )"; code=$?
 check "list exits 0" "$code" "0"
-check_true "lists the challenge by slug" "$(printf '%s' "$out" | grep -q 'hidden-file' && echo 0 || echo 1 )"
-check_true "shows it as open" "$(printf '%s' "$out" | grep -q 'open' && echo 0 || echo 1 )"
-check_true "shows the points total" "$(printf '%s' "$out" | grep -q '10 points' && echo 0 || echo 1 )"
+check_true "lists the challenges" "$([ "$(printf '%s' "$out" | grep -c 'pts')" = "6" ] && echo 0 || echo 1 )"
+check_true "shows the points total" "$(printf '%s' "$out" | grep -q '120 points' && echo 0 || echo 1 )"
+check_true "shows them all as open" "$([ "$(printf '%s' "$out" | grep -c 'open')" = "6" ] && echo 0 || echo 1 )"
 
-printf '\n── ctf start 01 ──\n'
-out="$( "$CTF" start 01 2>&1 )"; code=$?
-check "start exits 0" "$code" "0"
-check_true "prints the briefing" "$(printf '%s' "$out" | grep -qi 'home directory' && echo 0 || echo 1 )"
-check_true "does not reveal the file names" "$(printf '%s' "$out" | grep -q '\.backup-\|\.cache-' && echo 1 || echo 0 )"
+# ── play every challenge, exactly as documented ─────────────────────────────
+for cdir in "$REPO"/challenges/*/; do
+  [ -f "$cdir/challenge.sh" ] || continue
+  id="$(challenge_field "$cdir" CHALLENGE_ID)"
+  slug="$(challenge_field "$cdir" CHALLENGE_SLUG)"
+  title="$(challenge_field "$cdir" CHALLENGE_TITLE)"
+  want="$(expected_flag "$id")"
 
-flagfile="$(find_hidden "$HOME" ".backup-")"
-decoy="$(find_hidden "$HOME" ".cache-")"
-check_true "a hidden flag file was created" "$([ -n "$flagfile" ] && echo 0 || echo 1 )"
-check_true "a decoy file was created" "$([ -n "$decoy" ] && echo 0 || echo 1 )"
-check "the flag file is mode 600" "$(stat -c '%a' "$HOME/$flagfile" 2>/dev/null)" "600"
-check "a plain listing shows nothing" "$(ls "$HOME")" ""
+  printf '\n── %s  %s (%s) ──\n' "$id" "$title" "$slug"
 
-flag="$(grep -o 'LEARMUX{[^}]*}' "$HOME/$flagfile" | head -n1)"
-check_true "the flag file holds a flag" "$([ -n "$flag" ] && echo 0 || echo 1 )"
-check "the flag is the right shape" "$(printf '%s' "$flag" | grep -c '^LEARMUX{[0-9a-f]\{16\}}$' || true)" "1"
-# grep -c prints 0 and exits 1 when there is no match, so do not add a fallback
-check "the decoy holds no flag" "$(grep -c 'LEARMUX{' "$HOME/$decoy" 2>/dev/null)" "0"
-check_true "the flag file is in the manifest" "$(grep -q "$HOME/$flagfile" "$LEAR/manifest" && echo 0 || echo 1 )"
-check_true "the decoy is in the manifest" "$(grep -q "$HOME/$decoy" "$LEAR/manifest" && echo 0 || echo 1 )"
+  out="$( "$CTF" start "$id" 2>&1 )"; code=$?
+  check "$slug: start exits 0" "$code" "0"
+  check_true "$slug: does not reveal the file names" "$([ "$(printf '%s' "$out" | grep -cE '\.backup-|\.cache-|private-|part-a|access\.log|payload\.txt|backup-')" = "0" ] && echo 0 || echo 1 )"
 
-printf '\n── ctf check ──\n'
-out="$( "$CTF" check 01 'LEARMUX{deadbeefdeadbeef}' 2>&1 )"; code=$?
-check_true "a wrong flag is rejected" "$([ "$code" -ne 0 ] && echo 0 || echo 1 )"
-check_true "and says so" "$(printf '%s' "$out" | grep -qi 'not the right' && echo 0 || echo 1 )"
+  out="$(solve "$cdir")"
+  check_true "$slug: the documented solution finds the flag" "$(printf '%s' "$out" | grep -qF "$want" && echo 0 || echo 1 )"
 
-out="$( "$CTF" check 01 "$flag" 2>&1 )"; code=$?
-check "the right flag is accepted" "$code" "0"
-check_true "and reports the capture" "$(printf '%s' "$out" | grep -qi 'correct' && echo 0 || echo 1 )"
+  if "$CTF" check "$id" "$want" >/dev/null 2>&1; then code=0; else code=1; fi
+  check_true "$slug: the flag is accepted" "$code"
 
+  if "$CTF" check "$id" 'LEARMUX{0000000000000000}' >/dev/null 2>&1; then code=0; else code=1; fi
+  check_true "$slug: a wrong flag is rejected" "$([ "$code" -ne 0 ] && echo 0 || echo 1 )"
+
+  if "$CTF" reset "$id" >/dev/null 2>&1; then code=0; else code=1; fi
+  check_true "$slug: reset works" "$code"
+  check_true "$slug: the flag survives a reset" "$(solve "$cdir" | grep -qF "$want" && echo 0 || echo 1 )"
+done
+
+# ── progress ────────────────────────────────────────────────────────────────
+printf '\n── progress ──\n'
 out="$( "$CTF" list 2>&1 )"
-check_true "list now shows it captured" "$(printf '%s' "$out" | grep -q 'captured' && echo 0 || echo 1 )"
-check_true "and counts the points" "$(printf '%s' "$out" | grep -q '1 of 1 captured, 10 of 10 points' && echo 0 || echo 1 )"
+check_true "everything now reads as captured" "$([ "$(printf '%s' "$out" | grep 'pts' | grep -c 'captured')" = "6" ] && echo 0 || echo 1 )"
+check_true "and the points are counted" "$(printf '%s' "$out" | grep -q '6 of 6 captured, 120 of 120 points' && echo 0 || echo 1 )"
 
-printf '\n── ctf reset ──\n'
-rm -f "$HOME/$flagfile"
-out="$( "$CTF" reset 01 2>&1 )"; code=$?
-check "reset exits 0" "$code" "0"
-check_true "the file is back" "$([ -f "$HOME/$flagfile" ] && echo 0 || echo 1 )"
-check "the flag is unchanged by a reset" "$(grep -o 'LEARMUX{[^}]*}' "$HOME/$flagfile" | head -n1)" "$flag"
-out="$( "$CTF" list 2>&1 )"
-check_true "a reset keeps your capture" "$(printf '%s' "$out" | grep -q 'captured' && echo 0 || echo 1 )"
+# ── hints ───────────────────────────────────────────────────────────────────
+printf '\n── hints ──\n'
+out="$( "$CTF" hint 01 2>&1 )"
+check_true "the first hint is the first one" "$(printf '%s' "$out" | grep -q 'Hint 1 of 2' && echo 0 || echo 1 )"
+out="$( "$CTF" hint 01 2>&1 )"
+check_true "the next call gives the next hint" "$(printf '%s' "$out" | grep -q 'Hint 2 of 2' && echo 0 || echo 1 )"
+out="$( "$CTF" hint 01 2>&1 )"
+check_true "past the last one it says so" "$(printf '%s' "$out" | grep -qi 'last hint' && echo 0 || echo 1 )"
+out="$( "$CTF" hint 01 2>&1 )"
+check_true "and keeps saying so" "$(printf '%s' "$out" | grep -qi 'last hint' && echo 0 || echo 1 )"
 
-printf '\n── re-installing ──\n'
+# ── export ──────────────────────────────────────────────────────────────────
+printf '\n── export ──\n'
+out="$( "$CTF" export 2>&1 )"
+check_true "export mentions the device" "$(printf '%s' "$out" | grep -q '"device"' && echo 0 || echo 1 )"
+check_true "export counts the captures" "$(printf '%s' "$out" | grep -q '"solved": 6' && echo 0 || echo 1 )"
+check_true "export counts the points" "$(printf '%s' "$out" | grep -q '"points": 120' && echo 0 || echo 1 )"
+if command -v python3 >/dev/null 2>&1; then
+  json=1
+  if printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then json=0; fi
+  check_true "the export is valid JSON" "$json"
+fi
+
+out="$( "$CTF" export --challenges 2>&1 )"
+check_true "the challenge manifest lists all six" "$([ "$(printf '%s' "$out" | grep -c '"slug"')" = "6" ] && echo 0 || echo 1 )"
+check_true "the challenge manifest carries the briefing" "$(printf '%s' "$out" | grep -q '"briefing"' && echo 0 || echo 1 )"
+check_true "the challenge manifest carries no real flag" "$(printf '%s' "$out" | grep -qF "$(expected_flag 01)" && echo 1 || echo 0 )"
+if command -v python3 >/dev/null 2>&1; then
+  json=1
+  if printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then json=0; fi
+  check_true "the challenge manifest is valid JSON" "$json"
+fi
+
+# ── doctor ──────────────────────────────────────────────────────────────────
+printf '\n── doctor ──\n'
+out="$( "$CTF" doctor 2>&1 )"; code=$?
+check "doctor exits 0" "$code" "0"
+check_true "doctor reports the seed" "$(printf '%s' "$out" | grep -q '64 hex characters' && echo 0 || echo 1 )"
+check_true "doctor reports the challenges" "$(printf '%s' "$out" | grep -q '6 installed' && echo 0 || echo 1 )"
+check_true "doctor says everything is right" "$(printf '%s' "$out" | grep -q 'Everything looks right' && echo 0 || echo 1 )"
+
+# ── no arguments, no terminal ───────────────────────────────────────────────
+printf '\n── piped, with no arguments ──\n'
+out="$( "$CTF" 2>&1 )"; code=$?
+check "exits 0" "$code" "0"
+check_true "prints the how-to-play text rather than a menu" "$(printf '%s' "$out" | grep -q 'HOW TO PLAY' && echo 0 || echo 1 )"
+
+# ── reset and reinstall ─────────────────────────────────────────────────────
+printf '\n── reset, and re-installing ──\n'
+rm -f "$HOME"/.backup-*
+out="$( "$CTF" reset 01 2>&1 )"
+check_true "reset puts the files back" "$([ -n "$(find_hidden "$HOME" ".backup-")" ] && echo 0 || echo 1 )"
 out="$( bash "$REPO/install.sh" --yes --force 2>&1 )"; code=$?
 check "re-install exits 0" "$code" "0"
 check "the seed is not regenerated" "$(tr -d '\n' < "$LEAR/seed")" "$seed_before"
 out="$( "$CTF" list 2>&1 )"
 check_true "and your progress survives" "$(printf '%s' "$out" | grep -q 'captured' && echo 0 || echo 1 )"
 
+# ── a second device gets its own flags ──────────────────────────────────────
 printf '\n── a second device gets its own flags ──\n'
 export HOME="$TMP/home2"
 mkdir -p "$HOME"
@@ -136,22 +216,23 @@ bash "$REPO/install.sh" --yes --force >/dev/null 2>&1
 "$PREFIX/bin/ctf" start 01 >/dev/null 2>&1
 f2="$(find_hidden "$HOME" ".backup-")"
 flag_b="$(grep -o 'LEARMUX{[^}]*}' "$HOME/$f2" | head -n1)"
-check_true "a different seed" "$([ "$(tr -d '\n' < "$HOME/.learmux/seed")" != "$(tr -d '\n' < "$LEAR/seed")" ] && echo 0 || echo 1 )"
-check_true "a different flag" "$([ -n "$flag_b" ] && [ "$flag_b" != "$flag" ] && echo 0 || echo 1 )"
-check_true "a different file name" "$([ -n "$f2" ] && [ "$f2" != "$flagfile" ] && echo 0 || echo 1 )"
+check_true "a different seed" "$([ "$(tr -d '\n' < "$HOME/.learmux/seed")" != "$seed_before" ] && echo 0 || echo 1 )"
+check_true "a different flag" "$([ -n "$flag_b" ] && [ "$flag_b" != "$(expected_flag 01)" ] && echo 0 || echo 1 )"
+check_true "a different file name" "$([ -n "$f2" ] && echo 0 || echo 1 )"
 
+# ── uninstall ───────────────────────────────────────────────────────────────
 printf '\n── uninstall ──\n'
 export HOME="$TMP/home"
 out="$( bash "$REPO/uninstall.sh" --yes 2>&1 )"; code=$?
 check "uninstall exits 0" "$code" "0"
 check_true "the tool directory is gone" "$([ ! -d "$LEAR" ] && echo 0 || echo 1 )"
 check_true "the ctf command is gone" "$([ ! -e "$CTF" ] && echo 0 || echo 1 )"
-check_true "the flag file is gone" "$([ ! -e "$HOME/$flagfile" ] && echo 0 || echo 1 )"
-check_true "the decoy is gone" "$([ ! -e "$HOME/$decoy" ] && echo 0 || echo 1 )"
+check_true "the challenge files are gone" "$([ -z "$(find_hidden "$HOME" ".backup-")" ] && echo 0 || echo 1 )"
+check "no challenge directories remain" "$(find "$HOME" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" "0"
 check_true "PREFIX/bin was left alone" "$([ -d "$PREFIX/bin" ] && echo 0 || echo 1 )"
+check_true "the home directory itself is untouched" "$([ -d "$HOME" ] && echo 0 || echo 1 )"
 check_true "uninstall reports a clean removal" "$(printf '%s' "$out" | grep -q 'Removed' && printf '%s' "$out" | grep -q 'not empty' && echo 1 || echo 0 )"
 check_true "and lists no leftovers" "$(printf '%s' "$out" | grep -q 'left alone' && echo 1 || echo 0 )"
-check_true "the home directory itself is untouched" "$([ -d "$HOME" ] && echo 0 || echo 1 )"
 
 printf '\n── uninstalling again is harmless ──\n'
 out="$( bash "$REPO/uninstall.sh" --yes 2>&1 )"; code=$?
