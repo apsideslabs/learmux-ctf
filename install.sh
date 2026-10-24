@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LEARMUX_HOME="${LEARMUX_HOME:-$HOME/.learmux}"
@@ -186,7 +186,19 @@ copy_tree() { # <src-dir> <dest-dir>
 }
 
 copy_tree "$REPO_DIR/lib" "$LEARMUX_HOME/lib"
-copy_tree "$REPO_DIR/challenges" "$LEARMUX_HOME/challenges"
+
+# Each challenge contributes only its challenge.sh. A solution.sh, where one
+# exists, stays in the repository: the test suite runs it, and the player
+# should not be handed the answer.
+for cdir in "$REPO_DIR"/challenges/*/; do
+  [ -f "$cdir/challenge.sh" ] || continue
+  slug="$(basename "$cdir")"
+  dest="$LEARMUX_HOME/challenges/$slug"
+  mkdir -p "$dest"
+  manifest_record "$dest"
+  cp "$cdir/challenge.sh" "$dest/challenge.sh"
+  manifest_record "$dest/challenge.sh"
+done
 
 # ── the seed, and the files beside it ───────────────────────────────────────
 ensure_seed >/dev/null
