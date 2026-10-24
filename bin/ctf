@@ -307,6 +307,42 @@ cmd_hint() {
   fi
 }
 
+# Turn the hint text, which separates hints with a line of ---, into a JSON
+# array of strings. Reading it line by line would split a multi-line hint into
+# several entries.
+hints_json() { # reads stdin
+  awk '
+    # n must start as a number. An uninitialised variable used as a subscript
+    # becomes "", not 0, so the first hint would land under an empty key and
+    # never be found again.
+    BEGIN { n = 0 }
+    function esc(s) {
+      gsub(/\\/, "\\\\", s)
+      gsub(/"/, "\\\"", s)
+      gsub(/\t/, "\\t", s)
+      gsub(/\n/, "\\n", s)
+      return s
+    }
+    /^---$/ { n++; next }
+    {
+      if (n in parts) parts[n] = parts[n] "\n" $0
+      else parts[n] = $0
+    }
+    END {
+      printf "["
+      first = 1
+      for (i = 0; i <= n; i++) {
+        if (!(i in parts)) continue
+        if (!first) printf ","
+        first = 0
+        printf "\n        \"%s\"", esc(parts[i])
+      }
+      if (!first) printf "\n      "
+      printf "]"
+    }
+  '
+}
+
 # ── ctf export ──────────────────────────────────────────────────────────────
 # A receipt you can paste into the website. The website cannot verify it,
 # because it does not have your seed. It is a convenience, not a proof.
@@ -376,15 +412,7 @@ emit_challenges_json() {
     printf '      "points": %s,\n' "$points"
     printf '      "objective": "%s",\n' "$(json_escape "$objective")"
     printf '      "briefing": "%s",\n' "$(json_escape "$briefing")"
-    printf '      "hints": ['
-    local h hf=1
-    while IFS= read -r h; do
-      [ -n "$h" ] || continue
-      if [ "$hf" -eq 1 ]; then hf=0; printf '\n        '; else printf ',\n        '; fi
-      printf '"%s"' "$(json_escape "$h")"
-    done <<< "$(challenge_hints_of "$dir")"
-    if [ "$hf" -eq 0 ]; then printf '\n      '; fi
-    printf ']\n'
+    printf '      "hints": %s\n' "$(challenge_hints_of "$dir" | hints_json)"
     printf '    }'
   done <<< "$(challenge_dirs)"
 
