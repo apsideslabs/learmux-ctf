@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# ctf — the Learmux CTF command line.
+#
+# Four commands:
+#   ctf list              what is installed, and what you have captured
+#   ctf start <id>        read the briefing and set the challenge up
+#   ctf check <id> <flag> hand in a flag you found
+#   ctf reset <id>        put a challenge back to how it started
+#
+# Every flag is derived from a random value generated on this device at install
+# time, so your flags are yours alone.
+
+set -euo pipefail
+
+# install.sh rewrites the line below when it installs to a custom home.
+LEARMUX_DEFAULT_HOME="$HOME/.learmux"
+LEARMUX_HOME="${LEARMUX_HOME:-$LEARMUX_DEFAULT_HOME}"
+
+if [ ! -f "$LEARMUX_HOME/lib/common.sh" ]; then
+  printf 'ctf: cannot find the Learmux CTF at %s\n' "$LEARMUX_HOME" >&2
+  printf 'ctf: re-run install.sh from a clone of the repository\n' >&2
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+. "$LEARMUX_HOME/lib/common.sh"
+
+# ── small helpers ───────────────────────────────────────────────────────────
+# Shorten a string to a fixed width, marking that it was cut.
+shorten() {
+  local s="$1" max="${2:-28}"
+  if [ "${#s}" -le "$max" ]; then printf '%s' "$s"; else printf '%s..' "$(printf '%s' "$s" | cut -c1-$((max - 2)))"; fi
+}
+
+challenge_files_of() { # <dir>
+  ( . "$1/challenge.sh" >/dev/null 2>&1; challenge_files 2>/dev/null || true )
+}
+
+challenge_briefing_of() { # <dir>
+  ( . "$1/challenge.sh" >/dev/null 2>&1; challenge_briefing 2>/dev/null || true )
+}
+
+# Remove the files a challenge created, then let it build them again.
+challenge_rebuild() { # <dir>
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -e "$f" ] && rm -f "$f"
+  done <<< "$(challenge_files_of "$1")"
+
+  ( . "$1/challenge.sh" >/dev/null 2>&1; challenge_setup ) || die "ctf: setting up that challenge failed"
+
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    manifest_record "$f"
+  done <<< "$(challenge_files_of "$1")"
+}
+
+# ── ctf list ────────────────────────────────────────────────────────────────
+cmd_list() {
+  local dir id slug title diff points status
+  local total=0 earned=0 solved_n=0 count=0
+
+  rule
+  printf '%s  CHALLENGES%s\n' "$C_BOLD" "$C_RESET"
+  rule
+
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    id="$(challenge_meta "$dir" CHALLENGE_ID)"
+    slug="$(challenge_meta "$dir" CHALLENGE_SLUG)"
+    title="$(challenge_meta "$dir" CHALLENGE_TITLE)"
+    diff="$(challenge_meta "$dir" CHALLENGE_DIFFICULTY)"
+    points="$(challenge_meta "$dir" CHALLENGE_POINTS)"
+    total=$((total + points))
+    count=$((count + 1))
+    if is_solved "$slug"; then
+      status="${C_GREEN}captured${C_RESET}"
+      earned=$((earned + points))
+      solved_n=$((solved_n + 1))
+    else
+      status="${C_DIM}open${C_RESET}"
+    fi
+    printf '  %-4s %-16s %-26s %-7s %3s pts  %b\n' \
+      "$id" "$slug" "$(shorten "$title" 26)" "$diff" "$points" "$status"
+  done <<< "$(challenge_dirs)"
+
+  if [ "$count" -eq 0 ]; then
+    dim '  none installed'
+  fi
+
+  rule
+  printf '  %s of %s captured, %s of %s points\n' "$solved_n" "$count" "$earned" "$total"
+  printf '  %sctf start <id>%s to begin, %sctf check <id> <flag>%s to hand one in\n' \
+    "$C_DIM" "$C_RESET" "$C_DIM" "$C_RESET"
+}
+
+# ── ctf start ───────────────────────────────────────────────────────────────
+cmd_start() {
+  local want="${1:-}"
+  [ -n "$want" ] || die "usage: ctf start <id>    (see: ctf list)"
+
+  local dir
+  dir="$(challenge_dir "$want")" || die "ctf: no challenge matches '$want'    (see: ctf list)"
+
+  local id slug title points difficulty objective
+  id="$(challenge_meta "$dir" CHALLENGE_ID)"
+  slug="$(challenge_meta "$dir" CHALLENGE_SLUG)"
+  title="$(challenge_meta "$dir" CHALLENGE_TITLE)"
+  points="$(challenge_meta "$dir" CHALLENGE_POINTS)"
+  difficulty="$(challenge_meta "$dir" CHALLENGE_DIFFICULTY)"
+  objective="$(challenge_meta "$dir" CHALLENGE_OBJECTIVE)"
+
+  rule
+  printf '%s  %s  %s%s\n' "$C_BOLD" "$id" "$title" "$C_RESET"
+  printf '  %s%s, %s points%s\n' "$C_DIM" "$difficulty" "$points" "$C_RESET"
+  rule
+  say ''
+  challenge_briefing_of "$dir"
+  say ''
+  printf '%s  Objective%s\n' "$C_BOLD" "$C_RESET"
+  say "  $objective"
+  say ''
+
+  challenge_rebuild "$dir"
+
+  # Deliberately does not name the files it wrote. Finding them is the
+  # challenge; printing the paths would hand over the answer.
+  local n=0 f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    n=$((n + 1))
+  done <<< "$(challenge_files_of "$dir")"
+
+  printf '%s  Ready.%s %s file(s) are in place in your home directory.\n' \
+    "$C_GREEN" "$C_RESET" "$n"
+  say ''
+  printf '  When you have the flag: %sctf check %s LEARMUX{...}%s\n' "$C_DIM" "$id" "$C_RESET"
+  printf '  If you get lost: %sctf reset %s%s puts everything back.\n' "$C_DIM" "$id" "$C_RESET"
+  if is_solved "$slug"; then
+    dim '  (already captured, but you can play it again)'
+  fi
+}
+
+# ── ctf check ───────────────────────────────────────────────────────────────
+cmd_check() {
+  local want="${1:-}"
+  shift || true
+  local submitted="$*"
+
+  [ -n "$want" ] || die "usage: ctf check <id> <flag>"
+  [ -n "$submitted" ] || die "usage: ctf check <id> <flag>"
+
+  local dir
+  dir="$(challenge_dir "$want")" || die "ctf: no challenge matches '$want'    (see: ctf list)"
+
+  local id slug points expected
+  id="$(challenge_meta "$dir" CHALLENGE_ID)"
+  slug="$(challenge_meta "$dir" CHALLENGE_SLUG)"
+  points="$(challenge_meta "$dir" CHALLENGE_POINTS)"
+  expected="$(flag_for "$id")"
+
+  # be forgiving about stray whitespace and surrounding quotes
+  submitted="$(printf '%s' "$submitted" | tr -d '[:space:]' | sed "s/^['\"]//;s/['\"]$//")"
+
+  if [ "$submitted" = "$expected" ]; then
+    if is_solved "$slug"; then
+      ok "Correct. That one was already captured."
+    else
+      mark_solved "$slug"
+      ok "Correct. $id captured, $points points."
+    fi
+    return 0
+  fi
+
+  warn "Not the right flag for $id."
+  say ''
+  dim "  Check you are handing in the flag for $id, and that you copied the whole thing."
+  dim "  ctf start $id re-reads the briefing, and ctf reset $id puts the files back."
+  return 1
+}
+
+# ── ctf reset ───────────────────────────────────────────────────────────────
+cmd_reset() {
+  local want="${1:-}"
+  [ -n "$want" ] || die "usage: ctf reset <id>    (see: ctf list)"
+
+  local dir
+  dir="$(challenge_dir "$want")" || die "ctf: no challenge matches '$want'    (see: ctf list)"
+
+  local id slug
+  id="$(challenge_meta "$dir" CHALLENGE_ID)"
+  slug="$(challenge_meta "$dir" CHALLENGE_SLUG)"
+
+  challenge_rebuild "$dir"
+
+  if is_solved "$slug"; then
+    ok "Challenge $id reset. Your capture stands, so this is just for another run."
+  else
+    ok "Challenge $id reset to how it started."
+  fi
+}
+
+# ── help ────────────────────────────────────────────────────────────────────
+cmd_help() {
+  rule
+  printf '%s  Learmux CTF%s\n' "$C_BOLD" "$C_RESET"
+  rule
+  say ''
+  say '  ctf list                what is installed, and what you have captured'
+  say '  ctf start <id>          read the briefing and set the challenge up'
+  say '  ctf check <id> <flag>   hand in a flag you found'
+  say '  ctf reset <id>          put a challenge back to how it started'
+  say ''
+  printf '  %sFlags look like LEARMUX{...} and are unique to this device.%s\n' "$C_DIM" "$C_RESET"
+  printf '  %sEverything lives in %s%s\n' "$C_DIM" "$LEARMUX_HOME" "$C_RESET"
+  say ''
+}
+
+# ── dispatch ────────────────────────────────────────────────────────────────
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  list|ls)          cmd_list "$@" ;;
+  start|begin)      cmd_start "$@" ;;
+  check|submit)     cmd_check "$@" ;;
+  reset)            cmd_reset "$@" ;;
+  help|-h|--help)   cmd_help ;;
+  version|--version) cat "$LEARMUX_VERSION_FILE" 2>/dev/null || say 'unknown' ;;
+  *)
+    warn "ctf: no such command: $cmd"
+    say ''
+    cmd_help
+    exit 1
+    ;;
+esac
