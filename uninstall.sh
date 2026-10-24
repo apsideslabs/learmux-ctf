@@ -117,14 +117,26 @@ for f in "${files[@]}"; do
   fi
 done
 
-# ── then directories, children before parents ───────────────────────────────
-# The manifest records parents before children, so walking it backwards means
-# each directory is empty by the time we reach it.
+# ── then directories ────────────────────────────────────────────────────────
+# Order is not something we can rely on: the installer records a parent before
+# its children, but a challenge may declare them in any order. So sweep
+# repeatedly instead. Each pass removes every directory that is currently
+# empty, and a pass that removes nothing means we are done. A chain nested N
+# deep takes at most N passes, and N here is tiny.
+attempt=0
+while [ "$attempt" -lt 8 ]; do
+  attempt=$((attempt + 1))
+  progressed=0
+  for d in "${dirs[@]}"; do
+    [ -d "$d" ] || continue
+    if rmdir "$d" 2>/dev/null; then progressed=$((progressed + 1)); fi
+  done
+  [ "$progressed" -gt 0 ] || break
+done
+
 leftover=0
-for (( i=${#dirs[@]}-1; i>=0; i-- )); do
-  d="${dirs[$i]}"
-  [ -d "$d" ] || continue
-  rmdir "$d" 2>/dev/null || leftover=$((leftover + 1))
+for d in "${dirs[@]}"; do
+  [ -d "$d" ] && leftover=$((leftover + 1))
 done
 
 say ''
