@@ -1,0 +1,26 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suite needs no Termux: it installs into a throwaway HOME and
+      # PREFIX, plays the challenge, and uninstalls.
+      - name: Run the end-to-end suite
+        run: ./tests/run.sh
+
+      # A shell script with a typo can pass a casual read. This does not.
+      - name: Lint the shell scripts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck install.sh uninstall.sh bin/ctf lib/common.sh \
+            challenges/*/challenge.sh tests/run.sh
