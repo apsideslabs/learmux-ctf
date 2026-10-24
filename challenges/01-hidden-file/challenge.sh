@@ -2,10 +2,11 @@
 # The CHALLENGE_* values are read by the CLI through challenge_meta, so they
 # look unused in this file. That is expected.
 # shellcheck disable=SC2034
+#
 # Challenge 01 — Hidden in plain sight.
 #
 # Sourced by the ctf CLI. The CLI reads the CHALLENGE_* variables, then calls
-# challenge_briefing, challenge_files and challenge_setup.
+# challenge_briefing, challenge_files, challenge_setup and challenge_hints.
 #
 # The names of the files below are derived from this device's seed, so they are
 # different on every machine, and the flag inside is derived the same way.
@@ -28,6 +29,16 @@ challenge_briefing() {
     "One of the two holds your flag. The other is noise." \
     "" \
     "Your home directory is $HOME."
+}
+
+challenge_hints() {
+  cat <<'HINTS'
+A listing command usually has a flag of its own for showing everything.
+Try the short one with -a, or the long one with -A.
+---
+Dot files are ordinary files. Once you can see them, read them the same
+way you would read anything else. One of them has a line beginning 'flag:'.
+HINTS
 }
 
 # The two files this challenge writes. Kept in one place so the CLI, the
