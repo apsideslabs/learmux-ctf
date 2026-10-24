@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# The CHALLENGE_* values are read by the CLI through challenge_meta, so they
+# look unused in this file. That is expected.
+# shellcheck disable=SC2034
 # Challenge 01 — Hidden in plain sight.
 #
 # Sourced by the ctf CLI. The CLI reads the CHALLENGE_* variables, then calls
