@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Some values here are read by the CLI and the installer rather than used in
+# this file, so shellcheck cannot see the use. Challenge files are sourced by
+# path at runtime. Both are expected.
+# shellcheck disable=SC2034,SC1091
 # Shared helpers for the Learmux CTF.
 #
 # Sourced by the ctf CLI and by the installer. Not meant to be run directly.
