@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Each challenge is sourced from its own directory at runtime, so shellcheck
+# cannot follow the path. That is expected.
+# shellcheck disable=SC1091
 # ctf — the Learmux CTF command line.
 #
 # Four commands:
