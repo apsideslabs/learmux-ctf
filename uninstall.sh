@@ -69,8 +69,17 @@ done < "$MANIFEST"
 
 files=()
 dirs=()
+declare -A dir_seen=()
 for p in "${paths[@]}"; do
-  if [ -d "$p" ]; then dirs+=("$p"); elif [ -e "$p" ]; then files+=("$p"); fi
+  # a trailing "/." means the same directory as without it, so collapse it
+  p="${p%/.}"
+  if [ -d "$p" ]; then
+    [ -n "${dir_seen[$p]:-}" ] && continue
+    dir_seen[$p]=1
+    dirs+=("$p")
+  elif [ -e "$p" ]; then
+    files+=("$p")
+  fi
 done
 
 rule
