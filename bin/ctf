@@ -2,13 +2,18 @@
 # Each challenge is sourced from its own directory at runtime, so shellcheck
 # cannot follow the path. That is expected.
 # shellcheck disable=SC1091
+#
 # ctf — the Learmux CTF command line.
 #
-# Four commands:
 #   ctf list              what is installed, and what you have captured
 #   ctf start <id>        read the briefing and set the challenge up
 #   ctf check <id> <flag> hand in a flag you found
 #   ctf reset <id>        put a challenge back to how it started
+#   ctf hint <id>         reveal the next hint
+#   ctf export            a receipt of your progress, for the website
+#   ctf doctor            check that everything is where it should be
+#
+# Run `ctf` with no arguments for a menu.
 #
 # Every flag is derived from a random value generated on this device at install
 # time, so your flags are yours alone.
@@ -28,13 +33,7 @@ fi
 # shellcheck source=/dev/null
 . "$LEARMUX_HOME/lib/common.sh"
 
-# ── small helpers ───────────────────────────────────────────────────────────
-# Shorten a string to a fixed width, marking that it was cut.
-shorten() {
-  local s="$1" max="${2:-28}"
-  if [ "${#s}" -le "$max" ]; then printf '%s' "$s"; else printf '%s..' "$(printf '%s' "$s" | cut -c1-$((max - 2)))"; fi
-}
-
+# ── reading a challenge ─────────────────────────────────────────────────────
 challenge_files_of() { # <dir>
   ( . "$1/challenge.sh" >/dev/null 2>&1; challenge_files 2>/dev/null || true )
 }
@@ -43,12 +42,45 @@ challenge_briefing_of() { # <dir>
   ( . "$1/challenge.sh" >/dev/null 2>&1; challenge_briefing 2>/dev/null || true )
 }
 
+challenge_hints_of() { # <dir>
+  ( . "$1/challenge.sh" >/dev/null 2>&1; challenge_hints 2>/dev/null || true )
+}
+
+hint_count_of() { # <dir>
+  challenge_hints_of "$1" | hints_count
+}
+
+# How wide is the terminal? A phone in portrait is narrower than a desktop
+# terminal, so the challenge table drops the title rather than wrapping.
+term_width() {
+  local w="${COLUMNS:-0}"
+  case "$w" in ''|*[!0-9]*) w=0 ;; esac
+  if [ "$w" -le 0 ]; then
+    if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
+      w="$(tput cols 2>/dev/null || printf 80)"
+      case "$w" in ''|*[!0-9]*) w=80 ;; esac
+    else
+      w=80
+    fi
+  fi
+  printf '%s\n' "$w"
+}
+
+# Shorten a string to a fixed width, marking that it was cut.
+shorten() {
+  local s="$1" max="${2:-28}"
+  if [ "${#s}" -le "$max" ]; then printf '%s' "$s"; else printf '%s..' "$(printf '%s' "$s" | cut -c1-$((max - 2)))"; fi
+}
+
 # Remove the files a challenge created, then let it build them again.
 challenge_rebuild() { # <dir>
+  # -r because a challenge may declare a staging directory as well as files.
+  # Every path here is one the challenge derived itself, under the home
+  # directory, so removing it recursively is safe.
   local f
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    [ -e "$f" ] && rm -f "$f"
+    [ -e "$f" ] && rm -rf "$f"
   done <<< "$(challenge_files_of "$1")"
 
   ( . "$1/challenge.sh" >/dev/null 2>&1; challenge_setup ) || die "ctf: setting up that challenge failed"
@@ -59,10 +91,30 @@ challenge_rebuild() { # <dir>
   done <<< "$(challenge_files_of "$1")"
 }
 
+# Resolve an id or slug, or stop with a useful message.
+require_challenge() { # <want>
+  local dir
+  dir="$(challenge_dir "$1")" || die "ctf: no challenge matches '$1'    (see: ctf list)"
+  printf '%s\n' "$dir"
+}
+
+# ── the banner ──────────────────────────────────────────────────────────────
+banner() {
+  printf '%s' "$C_GREEN"
+  cat <<'ART'
+█░░ █▀▀ ▄▀█ █▀█ █▀▄▀█ █░█ ▀▄▀
+█▄▄ ██▄ █▀█ █▀▄ █░▀░█ █▄█ █░█
+▀▀▀ ▀▀▀ ▀░▀ ▀░▀ ▀░░░▀ ▀░▀ ▀░▀
+ART
+  printf '%s' "$C_RESET"
+  printf '  %sTermux CTF%s   %sreal flags, on your own device%s\n' \
+    "$C_BOLD" "$C_RESET" "$C_DIM" "$C_RESET"
+}
+
 # ── ctf list ────────────────────────────────────────────────────────────────
 cmd_list() {
   local dir id slug title diff points status
-  local total=0 earned=0 solved_n=0 count=0
+  local total solved_n count=0
 
   rule
   printf '%s  CHALLENGES%s\n' "$C_BOLD" "$C_RESET"
@@ -75,25 +127,29 @@ cmd_list() {
     title="$(challenge_meta "$dir" CHALLENGE_TITLE)"
     diff="$(challenge_meta "$dir" CHALLENGE_DIFFICULTY)"
     points="$(challenge_meta "$dir" CHALLENGE_POINTS)"
-    total=$((total + points))
-    count=$((count + 1))
+    count=$(( count + 1 ))
     if is_solved "$slug"; then
       status="${C_GREEN}captured${C_RESET}"
-      earned=$((earned + points))
-      solved_n=$((solved_n + 1))
+      solved_n=$(( ${solved_n:-0} + 1 ))
     else
       status="${C_DIM}open${C_RESET}"
     fi
-    printf '  %-4s %-16s %-26s %-7s %3s pts  %b\n' \
-      "$id" "$slug" "$(shorten "$title" 26)" "$diff" "$points" "$status"
+    if [ "$(term_width)" -lt 64 ]; then
+      printf '  %-4s %-19s %-7s %3s pts  %b\n' \
+        "$id" "$slug" "$diff" "$points" "$status"
+    else
+      printf '  %-4s %-19s %-21s %-7s %3s pts  %b\n' \
+        "$id" "$slug" "$(shorten "$title" 21)" "$diff" "$points" "$status"
+    fi
   done <<< "$(challenge_dirs)"
 
   if [ "$count" -eq 0 ]; then
     dim '  none installed'
   fi
 
+  total="$(points_total)"
   rule
-  printf '  %s of %s captured, %s of %s points\n' "$solved_n" "$count" "$earned" "$total"
+  printf '  %s of %s captured, %s of %s points\n' "${solved_n:-0}" "$count" "$(points_earned)" "$total"
   printf '  %sctf start <id>%s to begin, %sctf check <id> <flag>%s to hand one in\n' \
     "$C_DIM" "$C_RESET" "$C_DIM" "$C_RESET"
 }
@@ -104,7 +160,7 @@ cmd_start() {
   [ -n "$want" ] || die "usage: ctf start <id>    (see: ctf list)"
 
   local dir
-  dir="$(challenge_dir "$want")" || die "ctf: no challenge matches '$want'    (see: ctf list)"
+  dir="$(require_challenge "$want")"
 
   local id slug title points difficulty objective
   id="$(challenge_meta "$dir" CHALLENGE_ID)"
@@ -132,14 +188,15 @@ cmd_start() {
   local n=0 f
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    n=$((n + 1))
+    n=$(( n + 1 ))
   done <<< "$(challenge_files_of "$dir")"
 
   printf '%s  Ready.%s %s file(s) are in place in your home directory.\n' \
     "$C_GREEN" "$C_RESET" "$n"
   say ''
   printf '  When you have the flag: %sctf check %s LEARMUX{...}%s\n' "$C_DIM" "$id" "$C_RESET"
-  printf '  If you get lost: %sctf reset %s%s puts everything back.\n' "$C_DIM" "$id" "$C_RESET"
+  printf '  Stuck? %sctf hint %s%s. Lost? %sctf reset %s%s.\n' \
+    "$C_DIM" "$id" "$C_RESET" "$C_DIM" "$id" "$C_RESET"
   if is_solved "$slug"; then
     dim '  (already captured, but you can play it again)'
   fi
@@ -155,7 +212,7 @@ cmd_check() {
   [ -n "$submitted" ] || die "usage: ctf check <id> <flag>"
 
   local dir
-  dir="$(challenge_dir "$want")" || die "ctf: no challenge matches '$want'    (see: ctf list)"
+  dir="$(require_challenge "$want")"
 
   local id slug points expected
   id="$(challenge_meta "$dir" CHALLENGE_ID)"
@@ -167,11 +224,18 @@ cmd_check() {
   submitted="$(printf '%s' "$submitted" | tr -d '[:space:]' | sed "s/^['\"]//;s/['\"]$//")"
 
   if [ "$submitted" = "$expected" ]; then
+    say ''
+    printf '%s  ' "$C_GREEN"
+    reveal "$submitted"
+    printf '%s' "$C_RESET"
     if is_solved "$slug"; then
-      ok "Correct. That one was already captured."
+      ok '  Correct. That one was already captured.'
     else
       mark_solved "$slug"
-      ok "Correct. $id captured, $points points."
+      ok "  Correct. $id captured, $points points."
+      say ''
+      printf '  %s%s of %s points.  %sctf list%s to see what is left.%s\n' \
+        "$C_DIM" "$(points_earned)" "$(points_total)" "$C_RESET$C_DIM" "$C_RESET$C_DIM" "$C_RESET"
     fi
     return 0
   fi
@@ -189,7 +253,7 @@ cmd_reset() {
   [ -n "$want" ] || die "usage: ctf reset <id>    (see: ctf list)"
 
   local dir
-  dir="$(challenge_dir "$want")" || die "ctf: no challenge matches '$want'    (see: ctf list)"
+  dir="$(require_challenge "$want")"
 
   local id slug
   id="$(challenge_meta "$dir" CHALLENGE_ID)"
@@ -204,32 +268,327 @@ cmd_reset() {
   fi
 }
 
+# ── ctf hint ────────────────────────────────────────────────────────────────
+cmd_hint() {
+  local want="${1:-}"
+  [ -n "$want" ] || die "usage: ctf hint <id>    (see: ctf list)"
+
+  local dir
+  dir="$(require_challenge "$want")"
+
+  local slug total used
+  slug="$(challenge_meta "$dir" CHALLENGE_SLUG)"
+  total="$(hint_count_of "$dir")"
+  used="$(hints_revealed "$slug")"
+
+  if [ "$total" -eq 0 ]; then
+    dim 'This one has no hints. Read the briefing again, slowly.'
+    return 0
+  fi
+
+  if [ "$used" -ge "$total" ]; then
+    say ''
+    dim "  That was the last hint, $total of $total. Nothing more to give."
+    return 0
+  fi
+
+  used=$(( used + 1 ))
+  bump_hints "$slug" "$used"
+
+  say ''
+  printf '%s  Hint %s of %s%s\n' "$C_BOLD" "$used" "$total" "$C_RESET"
+  say ''
+  challenge_hints_of "$dir" | hints_nth "$used" | sed 's/^/  /'
+  say ''
+  if [ "$used" -lt "$total" ]; then
+    dim "  Another one is there if you want it: ctf hint $want"
+  else
+    dim '  That is all of them.'
+  fi
+}
+
+# ── ctf export ──────────────────────────────────────────────────────────────
+# A receipt you can paste into the website. The website cannot verify it,
+# because it does not have your seed. It is a convenience, not a proof.
+emit_progress_json() {
+  local version exported dir id slug title diff points solved first=1
+  version="$(cat "$LEARMUX_VERSION_FILE" 2>/dev/null || printf '0.0.0')"
+  exported="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)"
+
+  printf '{\n'
+  printf '  "format": "learmux-ctf/progress/1",\n'
+  printf '  "version": "%s",\n' "$(json_escape "$version")"
+  printf '  "device": "%s",\n' "$(device_id)"
+  printf '  "exported": "%s",\n' "$(json_escape "$exported")"
+  printf '  "solved": %s,\n' "$(solved_count)"
+  printf '  "total": %s,\n' "$(challenge_count)"
+  printf '  "points": %s,\n' "$(points_earned)"
+  printf '  "pointsTotal": %s,\n' "$(points_total)"
+  printf '  "hintsUsed": %s,\n' "$(hints_used_total)"
+  printf '  "challenges": ['
+
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    id="$(challenge_meta "$dir" CHALLENGE_ID)"
+    slug="$(challenge_meta "$dir" CHALLENGE_SLUG)"
+    title="$(challenge_meta "$dir" CHALLENGE_TITLE)"
+    diff="$(challenge_meta "$dir" CHALLENGE_DIFFICULTY)"
+    points="$(challenge_meta "$dir" CHALLENGE_POINTS)"
+    if is_solved "$slug"; then solved='true'; else solved='false'; fi
+    if [ "$first" -eq 1 ]; then first=0; printf '\n'; else printf ',\n'; fi
+    printf '    {"id":"%s","slug":"%s","title":"%s","difficulty":"%s","points":%s,"solved":%s,"hintsUsed":%s}' \
+      "$(json_escape "$id")" "$(json_escape "$slug")" "$(json_escape "$title")" \
+      "$(json_escape "$diff")" "$points" "$solved" "$(hints_revealed "$slug")"
+  done <<< "$(challenge_dirs)"
+
+  printf '\n  ]\n}\n'
+}
+
+# Metadata for every challenge, with no flags in it. This is what the website
+# reads to build its challenge pages, so the two stay in step.
+emit_challenges_json() {
+  local version dir id slug title category diff points objective briefing first=1
+  version="$(cat "$LEARMUX_VERSION_FILE" 2>/dev/null || printf '0.0.0')"
+
+  printf '{\n'
+  printf '  "format": "learmux-ctf/challenges/1",\n'
+  printf '  "version": "%s",\n' "$(json_escape "$version")"
+  printf '  "challenges": ['
+
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    id="$(challenge_meta "$dir" CHALLENGE_ID)"
+    slug="$(challenge_meta "$dir" CHALLENGE_SLUG)"
+    title="$(challenge_meta "$dir" CHALLENGE_TITLE)"
+    category="$(challenge_meta "$dir" CHALLENGE_CATEGORY)"
+    diff="$(challenge_meta "$dir" CHALLENGE_DIFFICULTY)"
+    points="$(challenge_meta "$dir" CHALLENGE_POINTS)"
+    objective="$(challenge_meta "$dir" CHALLENGE_OBJECTIVE)"
+    briefing="$(challenge_briefing_of "$dir")"
+
+    if [ "$first" -eq 1 ]; then first=0; printf '\n'; else printf ',\n'; fi
+    printf '    {\n'
+    printf '      "id": "%s",\n' "$(json_escape "$id")"
+    printf '      "slug": "%s",\n' "$(json_escape "$slug")"
+    printf '      "title": "%s",\n' "$(json_escape "$title")"
+    printf '      "category": "%s",\n' "$(json_escape "$category")"
+    printf '      "difficulty": "%s",\n' "$(json_escape "$diff")"
+    printf '      "points": %s,\n' "$points"
+    printf '      "objective": "%s",\n' "$(json_escape "$objective")"
+    printf '      "briefing": "%s",\n' "$(json_escape "$briefing")"
+    printf '      "hints": ['
+    local h hf=1
+    while IFS= read -r h; do
+      [ -n "$h" ] || continue
+      if [ "$hf" -eq 1 ]; then hf=0; printf '\n        '; else printf ',\n        '; fi
+      printf '"%s"' "$(json_escape "$h")"
+    done <<< "$(challenge_hints_of "$dir")"
+    if [ "$hf" -eq 0 ]; then printf '\n      '; fi
+    printf ']\n'
+    printf '    }'
+  done <<< "$(challenge_dirs)"
+
+  printf '\n  ]\n}\n'
+}
+
+cmd_export() {
+  case "${1:-}" in
+    --challenges|--manifest) emit_challenges_json ;;
+    --json|'')               emit_progress_json ;;
+    *) die 'usage: ctf export [--challenges]' ;;
+  esac
+}
+
+# ── ctf doctor ──────────────────────────────────────────────────────────────
+cmd_doctor() {
+  local problems=0
+  row() { printf '  %-16s %b\n' "$1" "$2"; }
+
+  rule
+  printf '%s  CTF DOCTOR%s\n' "$C_BOLD" "$C_RESET"
+  rule
+
+  # install
+  if [ -d "$LEARMUX_HOME" ] && [ -w "$LEARMUX_HOME" ]; then
+    row 'install' "${C_GREEN}ok${C_RESET}   $LEARMUX_HOME"
+  else
+    row 'install' "${C_RED}missing or read-only${C_RESET}   $LEARMUX_HOME"
+    problems=$(( problems + 1 ))
+  fi
+
+  row 'version' "$(cat "$LEARMUX_VERSION_FILE" 2>/dev/null || printf 'unknown')"
+
+  # seed
+  if [ -s "$LEARMUX_SEED" ]; then
+    local len mode
+    len="$(tr -d '\n' < "$LEARMUX_SEED" | wc -c | tr -d ' ')"
+    mode="$(stat -c '%a' "$LEARMUX_SEED" 2>/dev/null || printf '?')"
+    if [ "$len" -eq 64 ]; then
+      row 'seed' "${C_GREEN}ok${C_RESET}   64 hex characters, mode $mode"
+    else
+      row 'seed' "${C_RED}unexpected${C_RESET}   $len characters, mode $mode"
+      problems=$(( problems + 1 ))
+    fi
+  else
+    row 'seed' "${C_RED}missing${C_RESET}   run install.sh again"
+    problems=$(( problems + 1 ))
+  fi
+
+  # hashing
+  if have_sha256; then
+    row 'sha256' "$(command -v sha256sum >/dev/null 2>&1 && printf 'sha256sum' || command -v shasum >/dev/null 2>&1 && printf 'shasum' || printf 'openssl')"
+  else
+    row 'sha256' "${C_RED}none found${C_RESET}   pkg install coreutils"
+    problems=$(( problems + 1 ))
+  fi
+
+  # challenges
+  row 'challenges' "$(challenge_count) installed, $(solved_count) captured"
+
+  # manifest, and whether the challenge files it lists are still there
+  local recorded present missing=0 p
+  recorded="$(manifest_paths | grep -c . || true)"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in "$LEARMUX_HOME"/*) continue ;; esac
+    if [ ! -e "$p" ]; then missing=$(( missing + 1 )); fi
+  done <<< "$(manifest_paths)"
+  present="${recorded:-0}"
+  if [ "$missing" -eq 0 ]; then
+    row 'manifest' "${C_GREEN}ok${C_RESET}   $present paths, all present"
+  else
+    row 'manifest' "${C_YELLOW}$missing missing${C_RESET}   of $present, run ctf reset <id>"
+  fi
+
+  # the command itself
+  if command -v ctf >/dev/null 2>&1; then
+    row 'command' "$(command -v ctf)"
+  else
+    row 'command' "${C_YELLOW}not on PATH${C_RESET}   add its directory to PATH"
+  fi
+
+  rule
+  if [ "$problems" -eq 0 ]; then
+    ok '  Everything looks right.'
+  else
+    warn "  $problems thing(s) need attention."
+  fi
+  say ''
+}
+
+# ── the menu ────────────────────────────────────────────────────────────────
+clear_screen() {
+  if [ -t 1 ]; then printf '\033[2J\033[H'; fi
+}
+
+menu_prompt() { # <prompt> <varname>
+  printf '  %s' "$1"
+  read -r "$2" || return 1
+  return 0
+}
+
+cmd_menu() {
+  local choice id flag
+  while true; do
+    clear_screen
+    banner
+    say ''
+    printf '  %s%s of %s points%s\n' "$C_DIM" "$(points_earned)" "$(points_total)" "$C_RESET"
+    say ''
+    say '    1)  Challenges            what is here, and what you have captured'
+    say '    2)  Start a challenge     read the briefing, set it up'
+    say '    3)  Hand in a flag        check an answer'
+    say '    4)  Take a hint           one at a time'
+    say '    5)  Reset a challenge     put the files back'
+    say '    6)  How to play           the whole loop, explained'
+    say '    7)  Export progress       a receipt for the website'
+    say '    8)  Doctor                check the install'
+    say ''
+    say '    q)  Quit'
+    say ''
+    if ! menu_prompt 'Choose [1-8, q]: ' choice; then break; fi
+    say ''
+
+    case "$choice" in
+      1) cmd_list ;;
+      2)
+        if menu_prompt 'Challenge id: ' id && [ -n "$id" ]; then cmd_start "$id"; fi ;;
+      3)
+        if menu_prompt 'Challenge id: ' id && [ -n "$id" ] && menu_prompt 'Flag: ' flag; then
+          cmd_check "$id" "$flag" || true
+        fi ;;
+      4)
+        if menu_prompt 'Challenge id: ' id && [ -n "$id" ]; then cmd_hint "$id"; fi ;;
+      5)
+        if menu_prompt 'Challenge id: ' id && [ -n "$id" ]; then cmd_reset "$id"; fi ;;
+      6) cmd_help ;;
+      7) say ''; emit_progress_json ;;
+      8) cmd_doctor ;;
+      q|Q) clear_screen; break ;;
+      '') ;;
+      *) warn "  $choice is not one of the options." ;;
+    esac
+
+    say ''
+    printf '  %sPress Enter to go back to the menu.%s' "$C_DIM" "$C_RESET"
+    read -r _ || break
+  done
+}
+
 # ── help ────────────────────────────────────────────────────────────────────
 cmd_help() {
   rule
-  printf '%s  Learmux CTF%s\n' "$C_BOLD" "$C_RESET"
+  printf '%s  HOW TO PLAY%s\n' "$C_BOLD" "$C_RESET"
   rule
   say ''
-  say '  ctf list                what is installed, and what you have captured'
-  say '  ctf start <id>          read the briefing and set the challenge up'
-  say '  ctf check <id> <flag>   hand in a flag you found'
-  say '  ctf reset <id>          put a challenge back to how it started'
+  say '  Each challenge hides a flag in your own home directory. Find it,'
+  say '  then hand it in. The four commands you need:'
+  say ''
+  say '    ctf list                what is installed, and what you have captured'
+  say '    ctf start <id>          read the briefing and set the challenge up'
+  say '    ctf check <id> <flag>   hand in a flag you found'
+  say '    ctf reset <id>          put a challenge back to how it started'
+  say ''
+  say '  And three more for when you need them:'
+  say ''
+  say '    ctf hint <id>           reveal the next hint, one at a time'
+  say '    ctf export              a receipt of your progress, for the website'
+  say '    ctf doctor              check that everything is where it should be'
+  say ''
+  say '  A typical run:'
+  say ''
+  printf '    %s$ ctf list%s\n' "$C_DIM" "$C_RESET"
+  printf '    %s$ ctf start 01%s\n' "$C_DIM" "$C_RESET"
+  printf '    %s$ ls -a%s\n' "$C_DIM" "$C_RESET"
+  printf '    %s$ ctf check 01 LEARMUX{...}%s\n' "$C_DIM" "$C_RESET"
   say ''
   printf '  %sFlags look like LEARMUX{...} and are unique to this device.%s\n' "$C_DIM" "$C_RESET"
   printf '  %sEverything lives in %s%s\n' "$C_DIM" "$LEARMUX_HOME" "$C_RESET"
+  printf '  %sPlaying on your own device means you can read the challenge source.%s\n' "$C_DIM" "$C_RESET"
+  printf '  %sThat is yours to keep honest. The score only means something if you earned it.%s\n' "$C_DIM" "$C_RESET"
   say ''
 }
 
 # ── dispatch ────────────────────────────────────────────────────────────────
-cmd="${1:-help}"
-shift || true
+cmd="${1:-}"
+if [ $# -gt 0 ]; then shift; fi
+
+# No arguments: a menu on a terminal, help when piped.
+if [ -z "$cmd" ]; then
+  if [ -t 0 ] && [ -t 1 ]; then cmd_menu; else cmd_help; fi
+  exit 0
+fi
 
 case "$cmd" in
-  list|ls)          cmd_list "$@" ;;
-  start|begin)      cmd_start "$@" ;;
-  check|submit)     cmd_check "$@" ;;
-  reset)            cmd_reset "$@" ;;
-  help|-h|--help)   cmd_help ;;
+  list|ls)           cmd_list "$@" ;;
+  start|begin)       cmd_start "$@" ;;
+  check|submit)      cmd_check "$@" ;;
+  reset)             cmd_reset "$@" ;;
+  hint|hints)        cmd_hint "$@" ;;
+  export|receipt)    cmd_export "$@" ;;
+  doctor|checkup)    cmd_doctor "$@" ;;
+  menu)              cmd_menu ;;
+  help|-h|--help)    cmd_help ;;
   version|--version) cat "$LEARMUX_VERSION_FILE" 2>/dev/null || say 'unknown' ;;
   *)
     warn "ctf: no such command: $cmd"
