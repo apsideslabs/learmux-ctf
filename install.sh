@@ -170,9 +170,16 @@ copy_tree() { # <src-dir> <dest-dir>
     [ -n "$rel" ] || continue
     rel="${rel#./}"
     file="$src/$rel"
-    dir="$dest/$(dirname "$rel")"
-    mkdir -p "$dir"
-    manifest_record "$dir"
+    # dirname is '.' for a file at the top of the tree, which would record
+    # "$dest/." alongside "$dest". Record only real subdirectories.
+    sub="$(dirname "$rel")"
+    if [ "$sub" = "." ]; then
+      dir="$dest"
+    else
+      dir="$dest/$sub"
+      mkdir -p "$dir"
+      manifest_record "$dir"
+    fi
     cp "$file" "$dest/$rel"
     manifest_record "$dest/$rel"
   done <<< "$( cd "$src" && find . -type f -print )"
